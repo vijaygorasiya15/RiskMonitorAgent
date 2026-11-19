@@ -1,0 +1,8 @@
+{
+  "tenant_id": "smoke",
+  "transactions": [
+    {"transaction_id": "s-1", "amount": 24.90, "merchant": "Corner Cafe", "timestamp": "2026-11-01T13:05:00Z", "customer_id": "smoke-1"},
+    {"transaction_id": "s-2", "amount": 9800.00, "merchant": "QuickCrypto Exchange", "timestamp": "2026-11-01T02:41:00Z", "customer_id": "smoke-2"},
+    {"transaction_id": "s-3", "amount": 15.00, "merchant": "Metro Transit", "timestamp": "2026-11-01T08:15:00Z", "customer_id": "smoke-3"}
+  ]
+}

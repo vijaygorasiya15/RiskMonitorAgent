@@ -1,0 +1,124 @@
+name: ci-cd
+
+# Flow for a prompt / config change:
+#   edit prompts/v2.md or config.yaml -> push to main -> tests -> build image (tag = git SHA)
+#   -> push to ECR -> new AgentCore runtime version -> "staging" endpoint -> smoke test
+#   -> (manual approval) -> "prod" endpoint.   Rollback = repoint "prod" (see README).
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # for AWS OIDC (no long-lived keys)
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements-dev.txt
+      - run: ruff check .
+      - run: ruff format --check .
+      # LLM + webhook are mocked: tests need no AWS credentials and cost nothing.
+      - run: pytest -q
+
+  # Exercises the real deploy/promote/rollback scripts against a free local AWS emulator.
+  # No AWS account or credentials involved; dummy keys are used inside the script.
+  aws-flow-test:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements-dev.txt
+      - run: bash scripts/aws_emulator_e2e.sh
+
+  build:
+    needs: [test, aws-flow-test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t risk-monitor:${{ github.sha }} .
+      - name: Smoke test the container (mock engine, free)
+        run: |
+          docker compose up -d --build
+          bash scripts/smoke_test.sh http://localhost:8080
+          docker compose logs agent | tail -20
+          docker compose down -v
+
+  # Deploy only runs when you opt in (repo variable DEPLOY_ENABLED=true) and have set up AWS.
+  # It creates/updates AWS resources, which costs money.
+  deploy-staging:
+    needs: build
+    if: github.ref == 'refs/heads/main' && vars.DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    environment: staging
+    outputs:
+      version: ${{ steps.deploy.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - uses: aws-actions/amazon-ecr-login@v2
+        id: ecr
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Build (arm64, required by AgentCore) and push, tagged with git SHA
+        run: |
+          IMAGE=${{ steps.ecr.outputs.registry }}/${{ vars.ECR_REPOSITORY }}:${{ github.sha }}
+          docker buildx build --platform linux/arm64 -t "$IMAGE" --push .
+          echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install boto3 pyyaml
+      - name: Read the prompt version that config.yaml says should be active
+        run: |
+          echo "PROMPT_VERSION=$(python -c "import yaml;print(yaml.safe_load(open('config.yaml'))['prompt']['active_version'])")" >> "$GITHUB_ENV"
+      - name: Create new runtime version and point "staging" at it
+        id: deploy
+        env:
+          AGENTCORE_RUNTIME_ID: ${{ vars.AGENTCORE_RUNTIME_ID }}
+          AGENTCORE_ROLE_ARN: ${{ secrets.AGENTCORE_ROLE_ARN }}
+        run: python scripts/deploy_agentcore.py deploy --image "$IMAGE" --endpoint staging --prompt-version "$PROMPT_VERSION"
+      # Gate: invoke the DEPLOYED staging endpoint. A failure here stops the pipeline, so prod is
+      # never promoted (and the manual approval is never even requested) for a bad version.
+      - name: Smoke test staging (real endpoint, real LLM)
+        env:
+          AGENTCORE_RUNTIME_ID: ${{ vars.AGENTCORE_RUNTIME_ID }}
+        run: python scripts/smoke_agentcore.py --endpoint staging --expect-prompt-version "$PROMPT_VERSION"
+
+  promote-prod:
+    needs: deploy-staging
+    runs-on: ubuntu-latest
+    environment: production # configure required reviewers = manual approval gate
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install boto3
+      - name: Point "prod" at the exact version that was tested on staging
+        env:
+          AGENTCORE_RUNTIME_ID: ${{ vars.AGENTCORE_RUNTIME_ID }}
+        run: python scripts/deploy_agentcore.py promote --endpoint prod --version "${{ needs.deploy-staging.outputs.version }}"

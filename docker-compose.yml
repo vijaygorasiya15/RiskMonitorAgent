@@ -1,0 +1,26 @@
+# Local demo. Free by default: LLM_MODE=mock uses the rule-based engine (no AWS).
+# Real LLM:  LLM_MODE=bedrock docker compose up --build   (needs AWS creds in .env; costs a few rupees)
+services:
+  agent:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      LLM_MODE: ${LLM_MODE:-mock}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+      BEDROCK_MODEL_ID: ${BEDROCK_MODEL_ID:-us.anthropic.claude-haiku-4-5-20251001-v1:0}
+      PROMPT_VERSION: ${PROMPT_VERSION:-v1}
+      # demo only: the mock receiver lives on a private docker network address
+      WEBHOOK_ALLOW_PRIVATE: "true"
+      TENANTS_FILE: /app/tenants.example.yaml
+    depends_on:
+      - mock-webhook
+    restart: unless-stopped
+
+  mock-webhook:
+    build: ./mock_webhook
+    ports:
+      - "${WEBHOOK_HOST_PORT:-9100}:9000"

@@ -1,0 +1,31 @@
+# Versioned runtime config. Changing this file (or prompts/*.md) and pushing to
+# main triggers the CI/CD pipeline: test -> build image -> deploy.
+llm:
+  # "bedrock" = real LLM via AWS Bedrock; "mock" = free rule-based engine.
+  # Override per environment with the LLM_MODE env var.
+  mode: bedrock
+  # IMPORTANT: confirm this exact model/inference-profile ID in your Bedrock
+  # console (Model catalog) for your region before the first real call.
+  model_id: us.anthropic.claude-haiku-4-5-20251001-v1:0
+  region: us-east-1
+  temperature: 0.0
+
+prompt:
+  dir: prompts
+  active_version: v1
+
+max_transactions: 200
+
+webhook:
+  timeout_seconds: 5
+  max_attempts: 3
+  backoff_seconds: 0.5
+
+# Thresholds for the rule-based signals (mock engine).
+rules:
+  large_amount: 5000
+  night_start_hour: 0
+  night_end_hour: 5
+  velocity_count: 3
+  velocity_window_minutes: 10
+  risky_merchant_keywords: [crypto, gift card, wire transfer, casino, gambling]

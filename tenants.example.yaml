@@ -1,0 +1,12 @@
+# Example tenants for the LOCAL DEMO (docker-compose mock webhook receiver).
+# Real deployments: copy to tenants.yaml (git-ignored) and use *_env keys so
+# secrets come from environment / AWS Secrets Manager, never from git.
+tenants:
+  acme:
+    webhook_url: http://mock-webhook:9000/acme
+    api_key: demo-key-acme          # real: api_key_env: ACME_API_KEY
+    notify_min_severity: medium
+  globex:
+    webhook_url: http://mock-webhook:9000/globex
+    api_key: demo-key-globex
+    notify_min_severity: high       # globex only wants high-severity alerts

@@ -1,0 +1,17 @@
+# Free local AWS emulator (Floci) for testing the AWS-facing parts of the pipeline:
+# ECR push + AgentCore runtime create / deploy / promote / rollback.
+# It does NOT run a real LLM or real agent containers (see README).
+# Host port 4567 (not 4566) so it does not clash with other local emulators.
+#   docker compose -f docker-compose.floci.yml up -d
+services:
+  floci:
+    image: floci/floci:latest
+    ports:
+      - "${FLOCI_HOST_PORT:-4567}:4566"
+    environment:
+      FLOCI_BASE_URL: http://localhost:${FLOCI_HOST_PORT:-4567}
+      FLOCI_SERVICES_ECR_URI_STYLE: path
+    volumes:
+      - floci-data:/app/data
+volumes:
+  floci-data:
