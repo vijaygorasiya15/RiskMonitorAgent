@@ -99,7 +99,7 @@ Errors return `{"status": "error", "error": "<code>", ...}` (`invalid_request`, 
 ```bash
 python -m venv .venv && . .venv/bin/activate     # Windows: .venv\Scripts\activate
 pip install -r requirements-dev.txt
-pytest -q          # 30 tests; LLM and webhook are mocked, so no AWS or cost
+pytest -q          # 44 tests; LLM and webhook are mocked, so no AWS or cost
 ruff check . && ruff format --check .
 ```
 
@@ -133,37 +133,22 @@ Cloud deploy jobs are **off by default**. They run only when the repo variable
 `AWS_DEPLOY_ROLE_ARN` (OIDC role, no static keys), `AGENTCORE_ROLE_ARN`, vars `ECR_REPOSITORY`,
 `AGENTCORE_RUNTIME_ID`, `AWS_REGION`.
 
-### Test the AWS release flow for free (local emulator)
+### Deploying to real AWS
+
+Step-by-step (IAM roles, ECR, AgentCore, cleanup): [docs/AWS_SETUP.md](docs/AWS_SETUP.md). It can run
+with the free mock engine (`--llm-mode mock`) or the real Bedrock model.
+
+The same scripts the pipeline uses, run by hand:
 
 ```bash
-bash scripts/aws_emulator_e2e.sh
+python scripts/bootstrap_agentcore.py --image <ecr-uri:tag>      # create the runtime once
+python scripts/deploy_agentcore.py deploy --image <ecr-uri:tag>  # new version -> "staging"
+python scripts/smoke_agentcore.py --endpoint staging             # invoke the deployed endpoint
+python scripts/deploy_agentcore.py promote --version <N>         # "prod" -> that version
 ```
 
-This starts [Floci](https://floci.io), a free local AWS emulator ([docker-compose.floci.yml](docker-compose.floci.yml),
-host port 4567), then runs the **same** `bootstrap_agentcore.py` / `deploy_agentcore.py` commands the
-pipeline uses: create runtime, deploy new versions, promote `staging` to `prod`, roll back. It asserts
-that prompt version, image tag, and endpoints end up where expected, then tears everything down. It also runs in CI.
-
-What the emulator **cannot** prove: it runs no real LLM (Bedrock Runtime returns canned replies) and
-starts no agent container (AgentCore invoke returns a fixed stub), so the LLM path and the container on
-AgentCore still need one real-AWS check. ECR repo creation works, but image push needs the emulator to
-control your Docker daemon, so push is only tested against real AWS.
-
-### Switching from the emulator to a real AWS account
-
-Nothing in the code mentions the emulator. Scripts use the standard AWS SDK config, so only the
-environment changes:
-
-| | Local emulator | Real AWS |
-|---|---|---|
-| `AWS_ENDPOINT_URL` | `http://localhost:4567` | **unset** |
-| credentials | dummy (`test`/`test`) | your IAM user/role or `AWS_PROFILE` |
-| `AGENTCORE_ROLE_ARN` | any ARN | real execution role |
-| image registry | n/a | real ECR URI |
-| `LLM_MODE` | `mock` | `bedrock` |
-
-`scripts/e2e_deploy_flow.py` refuses to run without `AWS_ENDPOINT_URL` unless you pass `--real`, so
-it cannot touch a real account by accident.
+A real, public webhook receiver for demos (AWS Lambda + function URL, with a page that lists the
+alerts it received): `python scripts/deploy_webhook_receiver.py deploy`.
 
 ### Rollback
 
@@ -191,6 +176,14 @@ Locally: `PROMPT_VERSION=v1 docker compose up -d`.
 
 ## Status / honesty
 
-Verified locally: unit + API tests (30), lint, and the full request path with the mock engine and
-per-tenant webhooks. **Not yet exercised against real AWS:** the Bedrock model call, the ECR push,
-and the AgentCore deploy; these need your AWS account and cost a little, so they are run on request.
+**Verified locally:** unit + API tests (44), lint, and the full request path in Docker with the mock
+engine and per-tenant webhooks.
+
+**Verified on real AWS (with the mock engine, no Bedrock calls):** arm64 image push to ECR, AgentCore
+runtime creation, `staging` and `prod` endpoints, deploying a new version with a different prompt version,
+promoting it, rolling back, calling the deployed endpoint, and a real alert delivered over HTTPS to a
+public webhook receiver.
+
+**Not verified:** the real Bedrock model call (structured output together with tool use). A new AWS
+account starts with a Bedrock token quota of 0 for these models, so a quota increase must be approved
+first. Until then the strict staging smoke test, which requires the real LLM, cannot pass.

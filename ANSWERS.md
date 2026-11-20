@@ -1,69 +1,113 @@
-# Written answers
+# Written Answers
 
-## 1. You update the agent's prompt logic. How do you ship it without breaking existing users? What does versioning look like?
+Short answers to the assessment questions. Where something is already built and tested in this
+repo, I say so. Where it is how I would do it in production, I say that too.
 
-**Treat the prompt as a versioned artifact, not a hot-edited string.**
+---
 
-- Prompts live in git as `prompts/v1.md`, `prompts/v2.md`. Files are never edited after release;
-  a change is a new version. `config.yaml` names the `active_version` default.
-- Callers may pin `prompt_version` in the request. Customers who pinned `v1` keep getting `v1` behavior
-  until they choose to move. Every response and every webhook payload records the `prompt_version`
-  that produced it, so any alert can be traced back to the exact logic.
-- Code is versioned by image tag = git SHA. On AgentCore each deploy creates an immutable
-  **runtime version**, and traffic reaches it through a named **endpoint** (`staging`, `prod`).
-  An endpoint is just a pointer to a version.
+## How does a prompt or config change get from a code push to a running deployment?
 
-**Release process (safest first):**
-1. Run the new prompt against a labeled evaluation set of transactions in CI; compare precision/recall
-   and false-positive rate against the current version. Block the merge if it regresses.
-2. Deploy to `staging`; run the smoke test.
-3. **Shadow mode:** run v2 on a copy of real traffic, store its findings, and send *no* webhooks. Compare
-   with v1.
-4. **Canary:** move a small share of traffic (or one friendly tenant) to v2, watching flag rate,
-   webhook volume, and error rate.
-5. Promote `prod` to v2; keep v1 deployed for rollback.
+**The idea:** a prompt change is treated like any other code change. Prompts live in `prompts/` and
+settings live in `config.yaml`, so every change is reviewed in git and can be traced to a commit.
 
-Schema/API changes follow the same rule: add fields, don't change or remove them, so older clients keep working.
+```
+ You push to main
+        │
+        ▼
+ 1. Test        Lint + unit tests (LLM and webhook are mocked, so no AWS needed).
+        │       A failure stops everything here.
+        ▼
+ 2. Build       Build the container image, tag it with the git commit, smoke-test it.
+        │
+        ▼
+ 3. Staging     Create a NEW runtime version with the prompt version from config.yaml,
+        │       and point the "staging" endpoint at it.
+        ▼
+ 4. Smoke test  Call the deployed staging endpoint with a small batch that has one obvious
+        │       fraud. Fail if the prompt version is wrong, the fraud isn't flagged, almost
+        │       everything is flagged, or the webhook doesn't deliver.
+        ▼
+ 5. Approval    A person approves in GitHub.
+        │
+        ▼
+ 6. Production  Point the "prod" endpoint at the exact version that passed staging.
+```
+
+Every response and every webhook alert includes the `prompt_version` that produced it, so you can always
+tell which version made a decision.
+
+*Where to see it:* `.github/workflows/ci-cd.yml`. The README has a step-by-step example (switching from
+prompt `v1` to `v2`).
+
+---
+
+## 1. You update the prompt. How do you ship it without breaking existing users? What does versioning look like?
+
+**Short answer:** never edit a released prompt. Add a new version, test it, release it gradually, and let
+customers move over when they are ready.
+
+**How versioning works**
+
+| What | How it is versioned |
+|---|---|
+| Prompts | Separate files: `v1.md`, `v2.md`. A change is always a *new* file. |
+| Code | Each build is a container image tagged with the git commit. |
+| Deployment | Each deploy is a numbered, unchangeable runtime version. Customers reach it through a named endpoint (`staging`, `prod`) that points at one version. |
+
+**How existing users stay safe**
+- A customer can **pin** a version by sending `"prompt_version": "v1"` with their request. They keep getting
+  `v1` until they choose to switch. Customers who don't pin get the current default.
+- A new version goes to **staging first** and must pass the smoke test before anyone is asked to approve it.
+- Request and response formats only ever *add* fields, so older clients keep working.
+
+**What I would add in production** (described, not built in this repo): measure the new prompt against a set of
+labelled transactions before release, run it silently alongside the old one ("shadow mode") to compare
+results, then roll it out to one friendly customer before everyone.
+
+---
 
 ## 2. The new version starts producing false positives. How do you roll back quickly?
 
-Because releases are immutable and traffic goes through an endpoint pointer, rollback is a pointer move,
-not a rebuild:
+**Short answer:** move the `prod` pointer back to the previous version. It takes seconds and needs no rebuild.
 
-```bash
-python scripts/deploy_agentcore.py rollback          # prod endpoint -> previous runtime version
+Because every release is saved as an unchangeable version, and customers reach it through an endpoint
+(a pointer), rolling back just means pointing the endpoint at the older version:
+
+```
+python scripts/deploy_agentcore.py rollback
 ```
 
-It takes seconds. For prompt-only regressions there are even faster options: set `PROMPT_VERSION=v1`
-(or the config's `active_version`), or tell affected tenants to pin `prompt_version: v1`.
+- The old version is still deployed, so there is nothing to rebuild or wait for.
+- A customer who is badly affected can also pin `prompt_version: v1` straight away.
 
-To make it **quick to notice**, alert on the flag rate per tenant versus a baseline (a sudden jump
-in flagged-per-transaction or webhook volume pages someone), and consider an automatic rollback when it
-crosses a hard limit. Afterwards, add the false-positive cases to the evaluation set so the regression can't
-return, and fix forward as `v3`. Do not edit `v2`.
+**Noticing it quickly:** watch how often each customer's transactions get flagged. A sudden jump compared
+with normal is the warning sign (an alert on this is what I would add in production).
 
-Webhook receivers can dedupe and trace by the `Idempotency-Key` and `prompt_version` fields, so
-alerts raised by the bad version are easy to identify and dismiss.
+**Afterwards:** add the false-positive examples to the test set so it can't happen again, and fix it as a *new*
+version (`v3`). Never edit `v2`.
 
-## 3. Two customers use this agent. How do you keep their data, webhook URLs, and results completely separate?
+*Tested:* on real AWS AgentCore, a new version was deployed, promoted to `prod`, then rolled back. The
+endpoint served prompt `v1` again afterwards.
 
-Defense in depth, at each layer:
+---
 
-- **Identity:** every request is authenticated per tenant (API key here; in production a JWT/IAM identity
-  from the gateway), and the tenant is derived from that identity, never trusted from the payload alone.
-  Unknown tenant and bad key return the same error so tenant existence isn't leaked.
-- **Config and secrets:** each tenant has its own webhook URL, alert threshold, and credentials, loaded
-  from per-tenant entries in Secrets Manager (referenced with `*_env` keys, never committed).
-- **Execution:** the webhook client is constructed per request and bound to that tenant's URL, so the model
-  cannot choose a destination. A new agent instance per request means no conversation memory, cache, or tool
-  state is shared. On AgentCore, each session also runs in its own isolated microVM.
-- **Outputs:** the response and webhook contain only that tenant's transactions. Webhook payloads are built
-  from validated input, not model text. Logs carry tenant and transaction IDs but no raw customer data, and
-  any storage (audit log, evaluation data) is keyed/partitioned by `tenant_id`.
-- **Network safety:** webhook URLs are validated (HTTPS, public IPs only, no redirects) so a tenant can't
-  aim the agent at internal services (SSRF) or at another tenant.
-- **Stronger isolation if needed:** a separate AgentCore runtime + IAM role + KMS key per tenant (or per tier)
-  gives blast-radius isolation at the infrastructure level, at higher cost.
+## 3. Two customers use this agent. How do you keep their data, webhook URLs and results completely separate?
 
-This is exercised by tests: `test_tenants_are_isolated` (alerts hit only the right URL),
-`test_tenant_threshold_respected`, `test_wrong_key_and_unknown_tenant_same_error`.
+**Short answer:** each request is tied to exactly one customer from the moment it arrives, and nothing is
+shared between customers along the way.
+
+| Concern | What keeps it separate |
+|---|---|
+| **Who is calling** | Every request is checked against that customer's own API key. An unknown customer and a wrong key give the *same* error, so nobody can discover which customers exist. |
+| **Webhook URLs** | Each customer has their own URL in their own config. The code that sends alerts is created per request and locked to that customer's URL, so the AI model cannot choose where an alert goes. |
+| **Results** | Responses and alerts only contain that customer's transactions. Alert contents come from the validated input, not from text the model wrote. |
+| **State** | A new agent is created for every request, so there is no shared memory or conversation history. |
+| **Logs** | Logs record IDs only, not raw customer data. |
+| **Alert rules** | Each customer has their own alert threshold (for example, one gets medium and above, another only high). |
+| **Safety** | Webhook URLs must be HTTPS and point to the public internet. Internal addresses are blocked, so one customer can't use the agent to reach internal systems. |
+
+**If stricter isolation is needed:** give each customer their own deployment and access role. That is the
+strongest option, at a higher cost.
+
+*Tested:* `test_tenants_are_isolated` (alerts only reach the right URL), `test_tenant_threshold_respected`,
+and `test_wrong_key_and_unknown_tenant_same_error`.

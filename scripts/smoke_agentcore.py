@@ -10,8 +10,8 @@ Requires a tenant named "smoke" in the runtime's TENANTS_JSON (its webhook can b
 control). Invoking uses IAM (SigV4) auth, so the CI role needs bedrock-agentcore:InvokeAgentRuntime.
 With a real LLM this makes one small Bedrock call (a fraction of a cent).
 
---lenient only checks that the endpoint answers; used against a local emulator whose invoke is a stub.
-Works against real AWS, or an emulator when AWS_ENDPOINT_URL is set.
+--lenient only checks that the endpoint answers. Use it for a deployment that runs the mock engine
+(for example while Bedrock access is not ready); the strict form requires the real LLM.
 """
 
 from __future__ import annotations

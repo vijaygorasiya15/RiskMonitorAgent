@@ -5,8 +5,7 @@ The pipeline's deploy step then only *updates* this runtime (new immutable versi
   AGENTCORE_ROLE_ARN=arn:aws:iam::<acct>:role/<execution-role> \
   python scripts/bootstrap_agentcore.py --image <ecr-uri:tag> [--name risk_monitor]
 
-Works against real AWS, or a local emulator when AWS_ENDPOINT_URL is set.
-On real AWS this creates a resource: ask before running it.
+This creates an AWS resource: run it only on purpose.
 """
 
 from __future__ import annotations
@@ -14,6 +13,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import time
 
 import boto3
 
@@ -23,6 +23,8 @@ def main() -> None:
     p.add_argument("--image", required=True)
     p.add_argument("--name", default="risk_monitor")  # AgentCore names: letters, digits, underscore
     p.add_argument("--prompt-version", default="v1")
+    # "mock" = free rule-based engine (use while Bedrock access/quota is not ready). Default is real LLM.
+    p.add_argument("--llm-mode", choices=["bedrock", "mock"], default="bedrock")
     a = p.parse_args()
 
     role = os.environ.get("AGENTCORE_ROLE_ARN")
@@ -37,7 +39,7 @@ def main() -> None:
         rid = existing[0]["agentRuntimeId"]
         print(f"runtime '{a.name}' already exists", file=sys.stderr)
     else:
-        env = {"LLM_MODE": "bedrock", "PROMPT_VERSION": a.prompt_version}
+        env = {"LLM_MODE": a.llm_mode, "PROMPT_VERSION": a.prompt_version}
         if os.environ.get("TENANTS_JSON"):  # tenant webhooks/keys, incl. the "smoke" tenant
             env["TENANTS_JSON"] = os.environ["TENANTS_JSON"]
         rid = c.create_agent_runtime(
@@ -49,6 +51,15 @@ def main() -> None:
             environmentVariables=env,
         )["agentRuntimeId"]
         print(f"created runtime '{a.name}'", file=sys.stderr)
+    # Real AgentCore builds the runtime asynchronously; endpoints can only point at a READY version.
+    deadline = time.time() + 600
+    while True:
+        status = c.get_agent_runtime(agentRuntimeId=rid)["status"]
+        if status == "READY":
+            break
+        if status.endswith("FAILED") or time.time() > deadline:
+            sys.exit(f"runtime not ready: {status}")
+        time.sleep(5)
     print(rid)
 
 

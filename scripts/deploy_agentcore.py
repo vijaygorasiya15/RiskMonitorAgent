@@ -11,8 +11,6 @@ only repoints the endpoint, so rollback takes seconds and needs no rebuild.
   deploy_agentcore.py status
 
 Env: AWS_REGION, AGENTCORE_RUNTIME_ID, AGENTCORE_ROLE_ARN (for deploy).
-Target: real AWS by default. If AWS_ENDPOINT_URL is set (e.g. a local emulator), boto3 uses it
-automatically, so the exact same script works against both with no code change.
 THIS CREATES / CHANGES AWS RESOURCES (costs money): run only on purpose.
 """
 
@@ -81,7 +79,9 @@ def cmd_deploy(a) -> None:
     cur = c.get_agent_runtime(agentRuntimeId=rid)
     env = dict(cur.get("environmentVariables") or {})
     env["PROMPT_VERSION"] = a.prompt_version or env.get("PROMPT_VERSION", "v1")
-    env["LLM_MODE"] = "bedrock"
+    env["LLM_MODE"] = a.llm_mode  # default "bedrock": a pipeline deploy always restores the real LLM
+    if os.environ.get("TENANTS_JSON"):  # change tenant webhooks/keys; otherwise keep what is deployed
+        env["TENANTS_JSON"] = os.environ["TENANTS_JSON"]
     # UpdateAgentRuntime replaces the whole config: carry over everything we are not changing,
     # otherwise omitted settings (protocol, authorizer, ...) would be cleared.
     keep = {
@@ -144,6 +144,7 @@ def main() -> None:
     d.add_argument("--image", required=True)
     d.add_argument("--endpoint", default="staging")
     d.add_argument("--prompt-version")
+    d.add_argument("--llm-mode", choices=["bedrock", "mock"], default="bedrock")
     d.set_defaults(fn=cmd_deploy)
     pr = sub.add_parser("promote")
     pr.add_argument("--version", required=True)
